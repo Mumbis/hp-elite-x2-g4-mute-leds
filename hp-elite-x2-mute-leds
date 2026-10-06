@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""Drive the HP Elite x2 G4 mute-key LEDs from PipeWire mute state.
+
+F5 is the speaker mute dot, GPIO2 (bit 0x04). F8 is the microphone mute
+dot, GPIO0 (bit 0x01). A pin lights the dot when driven high and turns it
+off when driven low. GPIO1 is never changed.
+
+    hp-elite-x2-mute-leds --once     set the dots once
+    hp-elite-x2-mute-leds --follow   keep them matched to mute
+"""
+
+import os
+import select
+import struct
+import subprocess
+import sys
+import time
+import fcntl
+
+DEV = "/dev/snd/hwC0D0"
+VERB_WRITE = (3 << 30) | (8 << 16) | (ord("H") << 8) | 0x11
+AFG = 0x01
+SPK_BIT = 0x04
+MIC_BIT = 0x01
+LED_BITS = SPK_BIT | MIC_BIT
+
+
+def gpio(fd, command, param):
+    packed = struct.pack(
+        "II",
+        (AFG << 24) | ((command & 0xFFFF) << 8) | (param & 0xFF),
+        0,
+    )
+    out = fcntl.ioctl(fd, VERB_WRITE, packed)
+    _verb, res = struct.unpack("II", out)
+    return res & 0xFF
+
+
+def user_env():
+    base = "/run/user"
+    try:
+        entries = sorted(os.listdir(base))
+    except FileNotFoundError:
+        return None
+    for entry in entries:
+        runtime = os.path.join(base, entry)
+        if os.path.exists(os.path.join(runtime, "pulse", "native")):
+            env = os.environ.copy()
+            env["XDG_RUNTIME_DIR"] = runtime
+            env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={runtime}/bus"
+            return env
+    return None
+
+
+def is_muted(env, target):
+    result = subprocess.run(
+        ["wpctl", "get-volume", target],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=3,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"wpctl {target} failed")
+    return "MUTED" in result.stdout
+
+
+last_state = None
+
+
+def set_leds(speaker_muted, mic_muted):
+    global last_state
+    state = (speaker_muted, mic_muted)
+    fd = os.open(DEV, os.O_RDWR)
+    try:
+        mask = (gpio(fd, 0xF16, 0) & ~LED_BITS) | LED_BITS
+        direction = (gpio(fd, 0xF17, 0) & ~LED_BITS) | LED_BITS
+        data = gpio(fd, 0xF15, 0) & ~LED_BITS
+        if speaker_muted:
+            data |= SPK_BIT
+        if mic_muted:
+            data |= MIC_BIT
+        changed = state != last_state or (gpio(fd, 0xF15, 0) & LED_BITS) != (data & LED_BITS)
+        if changed:
+            gpio(fd, 0x716, mask)
+            gpio(fd, 0x717, direction)
+            gpio(fd, 0x715, data)
+            got = gpio(fd, 0xF15, 0)
+        else:
+            got = data
+    finally:
+        os.close(fd)
+    if (got & LED_BITS) != (data & LED_BITS):
+        raise RuntimeError(f"gpio data {got:#04x}, wanted {data:#04x}")
+    if changed:
+        last_state = state
+        print(
+            f"speaker {'muted' if speaker_muted else 'on'}, "
+            f"mic {'muted' if mic_muted else 'on'}",
+            flush=True,
+        )
+
+
+def sync(env):
+    set_leds(
+        is_muted(env, "@DEFAULT_AUDIO_SINK@"),
+        is_muted(env, "@DEFAULT_AUDIO_SOURCE@"),
+    )
+
+
+def once():
+    last = None
+    for _ in range(8):
+        env = user_env()
+        if env is None:
+            last = "no PipeWire session"
+            time.sleep(0.5)
+            continue
+        try:
+            sync(env)
+            return
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            last = exc
+            time.sleep(0.5)
+    print(f"could not sync mute LEDs: {last}", file=sys.stderr)
+    sys.exit(1)
+
+
+def follow():
+    while True:
+        env = user_env()
+        if env is None:
+            time.sleep(2)
+            continue
+        try:
+            sync(env)
+            proc = subprocess.Popen(
+                ["stdbuf", "-oL", "pactl", "subscribe"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            print(exc, file=sys.stderr)
+            time.sleep(2)
+            continue
+        fd = proc.stdout.fileno()
+        os.set_blocking(fd, False)
+        try:
+            while proc.poll() is None:
+                ready, _, _ = select.select([fd], [], [], 3)
+                if ready:
+                    chunk = proc.stdout.read() or ""
+                    if "sink" in chunk or "source" in chunk:
+                        sync(env)
+                else:
+                    sync(env)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            print(exc, file=sys.stderr)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        time.sleep(1)
+
+
+if __name__ == "__main__":
+    if "--follow" in sys.argv:
+        follow()
+    else:
+        once()

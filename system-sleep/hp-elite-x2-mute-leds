@@ -1,0 +1,5 @@
+#!/bin/sh
+# The codec drops the mute-LED pins on wake. Put them back after it returns.
+if [ "$1" = post ]; then
+  systemd-run --no-block --collect --on-active=3s /usr/local/sbin/hp-elite-x2-mute-leds --once
+fi

@@ -1,0 +1,2 @@
+# The codec resets these pins when the sound card is reprobed.
+ACTION=="add|change", SUBSYSTEM=="sound", KERNEL=="card0", RUN+="/usr/local/sbin/hp-elite-x2-mute-leds --once"
