@@ -1,0 +1,12 @@
+[Unit]
+Description=Track HP Elite x2 G4 mute-key LEDs
+After=sound.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/hp-elite-x2-mute-leds --follow
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
