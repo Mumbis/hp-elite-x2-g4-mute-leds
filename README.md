@@ -58,7 +58,7 @@ Needs PipeWire (`wpctl`, `pactl`) and root, because opening `/dev/snd/hwC0D0` re
 ```sh
 git clone https://github.com/Mumbis/hp-elite-x2-g4-mute-leds.git
 cd hp-elite-x2-g4-mute-leds
-sudo ./install.sh
+sudo sh install.sh
 ```
 
 The service watches the default sink and source and updates the dots within about a second. A sleep hook and a udev rule reapply the pins after wake and after the sound card is reprobed, because the codec releases them.
